@@ -1,30 +1,30 @@
 import json
 from falkordb import Graph
 from falkordb_gemini_kg.classes.source import AbstractSource
-from falkordb_gemini_kg.classes.model_config import StepModelConfig
+from falkordb_gemini_kg.models import GenerativeModel
 import falkordb_gemini_kg
 import logging
-from .edge import Edge
-from .node import Node
+from .relation import Relation
+from .entity import Entity
 
 logger = logging.getLogger(__name__)
 
 
 class Ontology(object):
-    def __init__(self, nodes: list[Node] = [], edges: list[Edge] = []):
-        self.nodes = nodes
-        self.edges = edges
+    def __init__(self, entities: list[Entity] = None, relations: list[Relation] = None):
+        self.entities = entities or []
+        self.relations = relations or []
 
     @staticmethod
     def from_sources(
         sources: list[AbstractSource],
         boundaries: str,
-        model_config: StepModelConfig,
+        model: GenerativeModel,
     ) -> "Ontology":
         step = falkordb_gemini_kg.CreateOntologyStep(
             sources=sources,
             ontology=Ontology(),
-            model_config=model_config,
+            model=model,
         )
 
         return step.run(boundaries=boundaries)
@@ -33,141 +33,154 @@ class Ontology(object):
     def from_json(txt: dict | str):
         txt = txt if isinstance(txt, dict) else json.loads(txt)
         return Ontology(
-            [Node.from_json(node) for node in txt["nodes"]],
-            [Edge.from_json(edge) for edge in txt["edges"]],
+            [Entity.from_json(entity) for entity in txt["entities"]],
+            [Relation.from_json(relation) for relation in txt["relations"]],
         )
 
     @staticmethod
     def from_graph(graph: Graph):
         ontology = Ontology()
 
-        nodes = graph.query("MATCH (n) RETURN n").result_set
-        for node in nodes:
-            ontology.add_node(Node.from_graph(node[0]))
+        entities = graph.query("MATCH (n) RETURN n").result_set
+        for entity in entities:
+            ontology.add_entity(Entity.from_graph(entity[0]))
 
-        for edge in graph.query("MATCH ()-[r]->() RETURN r").result_set:
-            ontology.add_edge(Edge.from_graph(edge[0], [x for xs in nodes for x in xs]))
+        for relation in graph.query("MATCH ()-[r]->() RETURN r").result_set:
+            ontology.add_relation(
+                Relation.from_graph(relation[0], [x for xs in entities for x in xs])
+            )
 
         return ontology
 
-    def add_node(self, node: Node):
-        self.nodes.append(node)
+    def add_entity(self, entity: Entity):
+        self.entities.append(entity)
 
-    def add_edge(self, edge: Edge):
-        self.edges.append(edge)
+    def add_relation(self, relation: Relation):
+        self.relations.append(relation)
 
     def to_json(self):
         return {
-            "nodes": [node.to_json() for node in self.nodes],
-            "edges": [edge.to_json() for edge in self.edges],
+            "entities": [entity.to_json() for entity in self.entities],
+            "relations": [relation.to_json() for relation in self.relations],
         }
 
     def merge_with(self, o: "Ontology"):
-        # Merge nodes
-        for node in o.nodes:
-            if node.label not in [n.label for n in self.nodes]:
-                # Node does not exist in self, add it
-                self.nodes.append(node)
-                logger.debug(f"Adding node {node.label}")
+        # Merge entities
+        for entity in o.entities:
+            if entity.label not in [n.label for n in self.entities]:
+                # Entity does not exist in self, add it
+                self.entities.append(entity)
+                logger.debug(f"Adding entity {entity.label}")
             else:
-                # Node exists in self, merge attributes
-                node1 = next(n for n in self.nodes if n.label == node.label)
-                node1.combine(node)
+                # Entity exists in self, merge attributes
+                entity1 = next(n for n in self.entities if n.label == entity.label)
+                entity1.merge(entity)
 
-        # Merge edges
-        for edge in o.edges:
-            if edge.label not in [e.label for e in self.edges]:
-                # Edge does not exist in self, add it
-                self.edges.append(edge)
-                logger.debug(f"Adding edge {edge.label}")
+        # Merge relations
+        for relation in o.relations:
+            if relation.label not in [e.label for e in self.relations]:
+                # Relation does not exist in self, add it
+                self.relations.append(relation)
+                logger.debug(f"Adding relation {relation.label}")
             else:
-                # Edge exists in self, merge attributes
-                edge1 = next(e for e in self.edges if e.label == edge.label)
-                edge1.combine(edge)
+                # Relation exists in self, merge attributes
+                relation1 = next(e for e in self.relations if e.label == relation.label)
+                relation1.combine(relation)
 
         return self
 
-    def discard_nodes_without_edges(self):
-        nodes_to_discard = [
-            node.label
-            for node in self.nodes
+    def discard_entities_without_relations(self):
+        entities_to_discard = [
+            entity.label
+            for entity in self.entities
             if all(
                 [
-                    edge.source.label != node.label and edge.target.label != node.label
-                    for edge in self.edges
+                    relation.source.label != entity.label
+                    and relation.target.label != entity.label
+                    for relation in self.relations
                 ]
             )
         ]
 
-        self.nodes = [node for node in self.nodes if node.label not in nodes_to_discard]
-        self.edges = [
-            edge
-            for edge in self.edges
-            if edge.source.label not in nodes_to_discard
-            and edge.target.label not in nodes_to_discard
+        self.entities = [
+            entity
+            for entity in self.entities
+            if entity.label not in entities_to_discard
+        ]
+        self.relations = [
+            relation
+            for relation in self.relations
+            if relation.source.label not in entities_to_discard
+            and relation.target.label not in entities_to_discard
         ]
 
-        if len(nodes_to_discard) > 0:
-            logger.info(f"Discarded nodes: {', '.join(nodes_to_discard)}")
+        if len(entities_to_discard) > 0:
+            logger.info(f"Discarded entities: {', '.join(entities_to_discard)}")
 
         return self
 
-    def discard_edges_without_nodes(self):
-        edges_to_discard = [
-            edge.label
-            for edge in self.edges
-            if edge.source.label not in [node.label for node in self.nodes]
-            or edge.target.label not in [node.label for node in self.nodes]
+    def discard_relations_without_entities(self):
+        relations_to_discard = [
+            relation.label
+            for relation in self.relations
+            if relation.source.label not in [entity.label for entity in self.entities]
+            or relation.target.label not in [entity.label for entity in self.entities]
         ]
 
-        self.edges = [edge for edge in self.edges if edge.label not in edges_to_discard]
+        self.relations = [
+            relation
+            for relation in self.relations
+            if relation.label not in relations_to_discard
+        ]
 
-        if len(edges_to_discard) > 0:
-            logger.info(f"Discarded edges: {', '.join(edges_to_discard)}")
+        if len(relations_to_discard) > 0:
+            logger.info(f"Discarded relations: {', '.join(relations_to_discard)}")
 
         return self
 
-    def validate_nodes(self):
-        # Check for nodes without unique attributes
-        nodes_without_unique_attributes = [
-            node.label for node in self.nodes if len(node.get_unique_attributes()) == 0
+    def validate_entities(self):
+        # Check for entities without unique attributes
+        entities_without_unique_attributes = [
+            entity.label
+            for entity in self.entities
+            if len(entity.get_unique_attributes()) == 0
         ]
-        if len(nodes_without_unique_attributes) > 0:
+        if len(entities_without_unique_attributes) > 0:
             logger.warn(
                 f"""
 *** WARNING ***
-The following nodes do not have unique attributes:
-{', '.join(nodes_without_unique_attributes)}
+The following entities do not have unique attributes:
+{', '.join(entities_without_unique_attributes)}
 """
             )
             return False
         return True
 
-    def get_node_with_label(self, label: str):
-        return next((n for n in self.nodes if n.label == label), None)
+    def get_entity_with_label(self, label: str):
+        return next((n for n in self.entities if n.label == label), None)
 
-    def get_edge_with_label(self, label: str):
-        return next((e for e in self.edges if e.label == label), None)
+    def get_relations_with_label(self, label: str):
+        return [e for e in self.relations if e.label == label]
 
-    def has_node_with_label(self, label: str):
-        return any(n.label == label for n in self.nodes)
+    def has_entity_with_label(self, label: str):
+        return any(n.label == label for n in self.entities)
 
-    def has_edge_with_label(self, label: str):
-        return any(e.label == label for e in self.edges)
+    def has_relation_with_label(self, label: str):
+        return any(e.label == label for e in self.relations)
 
     def __str__(self) -> str:
-        return "Nodes:\n\f- {nodes}\n\nEdges:\n\f- {edges}".format(
-            nodes="\n- ".join([str(node) for node in self.nodes]),
-            edges="\n- ".join([str(edge) for edge in self.edges]),
+        return "Entities:\n\f- {entities}\n\nEdges:\n\f- {relations}".format(
+            entities="\n- ".join([str(entity) for entity in self.entities]),
+            relations="\n- ".join([str(relation) for relation in self.relations]),
         )
 
     def save_to_graph(self, graph: Graph):
-        for node in self.nodes:
-            query = node.to_graph_query()
+        for entity in self.entities:
+            query = entity.to_graph_query()
             logger.debug(f"Query: {query}")
             graph.query(query)
 
-        for edge in self.edges:
-            query = edge.to_graph_query()
+        for relation in self.relations:
+            query = relation.to_graph_query()
             logger.debug(f"Query: {query}")
             graph.query(query)

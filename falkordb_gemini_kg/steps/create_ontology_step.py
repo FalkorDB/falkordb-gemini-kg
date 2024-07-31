@@ -3,23 +3,24 @@ from falkordb_gemini_kg.classes.source import AbstractSource
 from falkordb_gemini_kg.classes.Document import Document
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from falkordb_gemini_kg.classes.ontology import Ontology
-from falkordb_gemini_kg.classes.model_config import StepModelConfig
-from vertexai.generative_models import (
-    GenerativeModel,
-    ChatSession,
-    ResponseValidationError,
-    GenerationResponse,
-    FinishReason,
-)
 from falkordb_gemini_kg.fixtures.prompts import (
     CREATE_ONTOLOGY_SYSTEM,
     CREATE_ONTOLOGY_PROMPT,
     FIX_ONTOLOGY_PROMPT,
+    FIX_JSON_PROMPT,
 )
 import logging
 from falkordb_gemini_kg.helpers import extract_json
 from ratelimit import limits, sleep_and_retry
 import time
+from falkordb_gemini_kg.models import (
+    GenerativeModel,
+    GenerativeModelChatSession,
+    GenerativeModelConfig,
+    GenerationResponse,
+    FinishReason,
+)
+import json
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -34,7 +35,7 @@ class CreateOntologyStep(Step):
         self,
         sources: list[AbstractSource],
         ontology: Ontology,
-        model_config: StepModelConfig,
+        model: GenerativeModel,
         config: dict = {
             "max_workers": 16,
             "max_input_tokens": 500000,
@@ -43,19 +44,11 @@ class CreateOntologyStep(Step):
     ) -> None:
         self.sources = sources
         self.ontology = ontology
-        self.model_config = model_config
+        self.model = model.with_system_instruction(CREATE_ONTOLOGY_SYSTEM)
         self.config = config
 
     def _create_chat(self):
-        return GenerativeModel(
-            self.model_config.model,
-            generation_config=(
-                self.model_config.generation_config.to_generation_config()
-                if self.model_config.generation_config is not None
-                else None
-            ),
-            system_instruction=CREATE_ONTOLOGY_SYSTEM,
-        ).start_chat(response_validation=False)
+        return self.model.start_chat({"response_validation": False})
 
     def run(self, boundaries: str):
         tasks: list[Future[Ontology]] = []
@@ -81,7 +74,7 @@ class CreateOntologyStep(Step):
         for task in tasks:
             self.ontology = self.ontology.merge_with(task.result())
 
-        if len(self.ontology.nodes) == 0:
+        if len(self.ontology.entities) == 0:
             raise Exception("Failed to create ontology")
 
         self.ontology = self._fix_ontology(self._create_chat(), self.ontology)
@@ -90,7 +83,7 @@ class CreateOntologyStep(Step):
 
     def _process_source(
         self,
-        chat_session: ChatSession,
+        chat_session: GenerativeModelChatSession,
         document: Document,
         o: Ontology,
         boundaries: str,
@@ -104,26 +97,42 @@ class CreateOntologyStep(Step):
 
         responses.append(self._call_model(chat_session, user_message))
 
-        logger.debug(f"Model response: {responses[response_idx].text}")
+        logger.debug(f"Model response: {responses[response_idx]}")
 
-        while (
-            responses[response_idx].candidates[0].finish_reason
-            == FinishReason.MAX_TOKENS
-        ):
+        while responses[response_idx].finish_reason == FinishReason.MAX_TOKENS:
             response_idx += 1
             responses.append(self._call_model(chat_session, "continue"))
 
-        if responses[response_idx].candidates[0].finish_reason != FinishReason.STOP:
+        if responses[response_idx].finish_reason != FinishReason.STOP:
             raise Exception(
-                f"Model stopped unexpectedly: {responses[response_idx].candidates[0].finish_reason}"
+                f"Model stopped unexpectedly: {responses[response_idx].finish_reason}"
             )
 
         combined_text = " ".join([r.text for r in responses])
 
         try:
-            new_ontology = Ontology.from_json(extract_json(combined_text))
+            data = json.loads(extract_json(combined_text))
+        except json.decoder.JSONDecodeError as e:
+            logger.debug(f"Error extracting JSON: {e}")
+            logger.debug(f"Prompting model to fix JSON")
+            json_fix_response = self._call_model(
+                self._create_chat(),
+                FIX_JSON_PROMPT.format(json=combined_text, error=str(e)),
+            )
+            try:
+                data = json.loads(extract_json(json_fix_response.text))
+                logger.debug(f"Fixed JSON: {data}")
+            except json.decoder.JSONDecodeError as e:
+                logger.error(f"Failed to fix JSON: {e}  {json_fix_response.text}")
+                data = None
+
+        if data is None:
+            return o
+        
+        try:
+            new_ontology = Ontology.from_json(data)
         except Exception as e:
-            logger.debug(f"Exception while extracting JSON: {e}")
+            logger.error(f"Exception while extracting JSON: {e}")
             new_ontology = None
 
         if new_ontology is not None:
@@ -133,7 +142,7 @@ class CreateOntologyStep(Step):
 
         return o
 
-    def _fix_ontology(self, chat_session: ChatSession, o: Ontology):
+    def _fix_ontology(self, chat_session: GenerativeModelChatSession, o: Ontology):
         logger.debug(f"Fixing ontology...")
 
         user_message = FIX_ONTOLOGY_PROMPT.format(ontology=o)
@@ -145,24 +154,40 @@ class CreateOntologyStep(Step):
 
         logger.debug(f"Model response: {responses[response_idx]}")
 
-        while (
-            responses[response_idx].candidates[0].finish_reason
-            == FinishReason.MAX_TOKENS
-        ):
+        while responses[response_idx].finish_reason == FinishReason.MAX_TOKENS:
             response_idx += 1
             responses.append(self._call_model(chat_session, "continue"))
 
-        if responses[response_idx].candidates[0].finish_reason != FinishReason.STOP:
+        if responses[response_idx].finish_reason != FinishReason.STOP:
             raise Exception(
-                f"Model stopped unexpectedly: {responses[response_idx].candidates[0].finish_reason}"
+                f"Model stopped unexpectedly: {responses[response_idx].finish_reason}"
             )
 
         combined_text = " ".join([r.text for r in responses])
 
         try:
-            new_ontology = Ontology.from_json(extract_json(combined_text))
+            data = json.loads(extract_json(combined_text))
+        except json.decoder.JSONDecodeError as e:
+            logger.debug(f"Error extracting JSON: {e}")
+            logger.debug(f"Prompting model to fix JSON")
+            json_fix_response = self._call_model(
+                self._create_chat(),
+                FIX_JSON_PROMPT.format(json=combined_text, error=str(e)),
+            )
+            try:
+                data = json.loads(extract_json(json_fix_response.text))
+                logger.debug(f"Fixed JSON: {data}")
+            except json.decoder.JSONDecodeError as e:
+                logger.error(f"Failed to fix JSON: {e} {json_fix_response.text}")
+                data = None
+
+        if data is None:
+            return o
+        
+        try:
+            new_ontology = Ontology.from_json(data)
         except Exception as e:
-            print(f"Exception while extracting JSON: {e}")
+            logger.debug(f"Exception while extracting JSON: {e}")
             new_ontology = None
 
         if new_ontology is not None:
@@ -176,7 +201,7 @@ class CreateOntologyStep(Step):
     @limits(calls=15, period=60)
     def _call_model(
         self,
-        chat_session: ChatSession,
+        chat_session: GenerativeModelChatSession,
         prompt: str,
         retry=6,
     ):

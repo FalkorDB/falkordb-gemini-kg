@@ -1,14 +1,22 @@
 import re
-from falkordb_gemini_kg.classes.ontology import Ontology
+import falkordb_gemini_kg
 import logging
+from fix_busted_json import repair_json
 
 logger = logging.getLogger(__name__)
 
-def extract_json(text: str):
+
+def extract_json(text: str | dict, skip_repair=False) -> str:
+    if not isinstance(text, str):
+        text = str(text)
     regex = r"(?:```)?(?:json)?([^`]*)(?:\\n)?(?:```)?"
     matches = re.findall(regex, text, re.DOTALL)
 
-    return "".join(matches)
+    try:
+        return repair_json("".join(matches)) if not skip_repair else "".join(matches)
+    except Exception as e:
+        logger.error(f"Failed to repair JSON: {e} - {text}")
+        return "".join(matches)
 
 
 def map_dict_to_cypher_properties(d: dict):
@@ -69,21 +77,23 @@ def extract_cypher(text: str):
     return "".join(matches)
 
 
-def validate_cypher(cypher: str, ontology: Ontology) -> list[str] | None:
+def validate_cypher(
+    cypher: str, ontology: falkordb_gemini_kg.Ontology
+) -> list[str] | None:
     try:
         if not cypher or len(cypher) == 0:
-            return "Cypher statement is empty"
+            return ["Cypher statement is empty"]
 
         errors = []
 
-        # Check if nodes exist in ontology
-        errors.extend(validate_cypher_nodes_exist(cypher, ontology))
+        # Check if entities exist in ontology
+        errors.extend(validate_cypher_entities_exist(cypher, ontology))
 
-        # Check if edges exist in ontology
-        errors.extend(validate_cypher_edges_exist(cypher, ontology))
+        # Check if relations exist in ontology
+        errors.extend(validate_cypher_relations_exist(cypher, ontology))
 
-        # Check if edge directions are correct
-        errors.extend(validate_cypher_edge_directions(cypher, ontology))
+        # Check if relation directions are correct
+        errors.extend(validate_cypher_relation_directions(cypher, ontology))
 
         if len(errors) > 0:
             return errors
@@ -94,91 +104,110 @@ def validate_cypher(cypher: str, ontology: Ontology) -> list[str] | None:
         return None
 
 
-def validate_cypher_nodes_exist(cypher: str, ontology: Ontology):
-    # Check if nodes exist in ontology
-    not_found_node_labels = []
-    node_labels = re.findall(r"\(:(.*?)\)", cypher)
-    for label in node_labels:
+def validate_cypher_entities_exist(cypher: str, ontology: falkordb_gemini_kg.Ontology):
+    # Check if entities exist in ontology
+    not_found_entity_labels = []
+    entity_labels = re.findall(r"\(:(.*?)\)", cypher)
+    for label in entity_labels:
         label = label.split(":")[1] if ":" in label else label
         label = label.split("{")[0].strip() if "{" in label else label
-        if label not in [node.label for node in ontology.nodes]:
-            not_found_node_labels.append(label)
+        if label not in [entity.label for entity in ontology.entities]:
+            not_found_entity_labels.append(label)
 
-    return [f"Node {label} not found in ontology" for label in not_found_node_labels]
+    return [
+        f"Entity {label} not found in ontology" for label in not_found_entity_labels
+    ]
 
 
-def validate_cypher_edges_exist(cypher: str, ontology: Ontology):
-    # Check if edges exist in ontology
-    not_found_edge_labels = []
-    edge_labels = re.findall(r"\[:(.*?)\]", cypher)
-    for label in edge_labels:
+def validate_cypher_relations_exist(cypher: str, ontology: falkordb_gemini_kg.Ontology):
+    # Check if relations exist in ontology
+    not_found_relation_labels = []
+    relation_labels = re.findall(r"\[:(.*?)\]", cypher)
+    for label in relation_labels:
         label = label.split(":")[1] if ":" in label else label
         label = label.split("{")[0].strip() if "{" in label else label
-        if label not in [edge.label for edge in ontology.edges]:
-            not_found_edge_labels.append(label)
+        if label not in [relation.label for relation in ontology.relations]:
+            not_found_relation_labels.append(label)
 
-    return [f"Edge {label} not found in ontology" for label in not_found_edge_labels]
+    return [
+        f"Relation {label} not found in ontology" for label in not_found_relation_labels
+    ]
 
 
-def validate_cypher_edge_directions(cypher: str, ontology: Ontology):
+def validate_cypher_relation_directions(
+    cypher: str, ontology: falkordb_gemini_kg.Ontology
+):
 
     errors = []
-    edges = list(re.finditer(r"\[.*?\]", cypher))
+    relations = list(re.finditer(r"\[.*?\]", cypher))
     i = 0
-    for edge in edges:
+    for relation in relations:
         try:
-            edge_label = (
-                re.search(r"(?:\[)(?:\w)*(?:\:)([^{\]]+)", edge.group(0))
+            relation_label = (
+                re.search(r"(?:\[)(?:\w)*(?:\:)([^{\]]+)", relation.group(0))
                 .group(1)
                 .strip()
             )
-            prev_edge = edges[i - 1] if i > 0 else None
-            next_edge = edges[i + 1] if i < len(edges) - 1 else None
+            prev_relation = relations[i - 1] if i > 0 else None
+            next_relation = relations[i + 1] if i < len(relations) - 1 else None
             before = (
-                cypher[prev_edge.end() : edge.start()]
-                if prev_edge
-                else cypher[: edge.start()]
+                cypher[prev_relation.end() : relation.start()]
+                if prev_relation
+                else cypher[: relation.start()]
             )
-            rel_before = re.search(r"([^\)\]]+)", before[::-1]).group(0)[::-1]
+            if "," in before:
+                before = before.split(",")[-1]
+            rel_before = re.search(r"([^\)\],]+)", before[::-1]).group(0)[::-1]
             after = (
-                cypher[edge.end() : next_edge.start()]
-                if next_edge
-                else cypher[edge.end() :]
+                cypher[relation.end() : next_relation.start()]
+                if next_relation
+                else cypher[relation.end() :]
             )
-            rel_after = re.search(r"([^\(\[]+)", after).group(0)
-            node_before = re.search(r"\(.+:(.*?)\)", before).group(0)
-            node_after = re.search(r"\(([^\)]+)(\)?)", after).group(0)
+            rel_after = re.search(r"([^\(\[,]+)", after).group(0)
+            entity_before = re.search(r"\(.+:(.*?)\)", before).group(0)
+            entity_after = re.search(r"\(([^\),]+)(\)?)", after).group(0)
             if rel_before == "-" and rel_after == "->":
-                source = node_before
-                target = node_after
+                source = entity_before
+                target = entity_after
             elif rel_before == "<-" and rel_after == "-":
-                source = node_after
-                target = node_before
+                source = entity_after
+                target = entity_before
             else:
                 continue
 
             source_label = re.search(r"(?:\:)([^\)\{]+)", source).group(1).strip()
             target_label = re.search(r"(?:\:)([^\)\{]+)", target).group(1).strip()
 
-            ontology_edge = ontology.get_edge_with_label(edge_label)
+            ontology_relations = ontology.get_relations_with_label(relation_label)
 
-            if ontology_edge is None:
-                errors.append(f"Edge {edge_label} not found in ontology")
+            if len(ontology_relations) == 0:
+                errors.append(f"Relation {relation_label} not found in ontology")
 
-            logger.debug(
-                f"ontology_edge: {ontology_edge}"
-            )
-            if (
-                not ontology_edge.source.label == source_label
-                or not ontology_edge.target.label == target_label
-            ):
+            found_relation = False
+            for ontology_relation in ontology_relations:
+                if (
+                    ontology_relation.source.label == source_label
+                    and ontology_relation.target.label == target_label
+                ):
+                    found_relation = True
+                    break
+
+            if not found_relation:
                 errors.append(
-                    f"Edge {edge_label} has a mismatched source or target. Make sure the edge direction is correct. The edge should connect {ontology_edge.source.label} to {ontology_edge.target.label}."
+                    """
+                    Relation {relation_label} does not connect {source_label} to {target_label}. Make sure the relation direction is correct. 
+                    Valid relations: 
+                    {valid_relations}
+""".format(
+                        relation_label=relation_label,
+                        source_label=source_label,
+                        target_label=target_label,
+                        valid_relations="\n".join([str(e) for e in ontology_relations]),
+                    )
                 )
 
             i += 1
-        except Exception as e:
-            errors.append(str(e))
+        except Exception:
             continue
 
     return errors

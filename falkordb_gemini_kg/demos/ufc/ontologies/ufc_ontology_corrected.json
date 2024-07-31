@@ -1,5 +1,5 @@
 {
-  "nodes": [
+  "entities": [
     {
       "label": "Fighter",
       "attributes": [
@@ -217,7 +217,7 @@
       ]
     }
   ],
-  "edges": [
+  "relations": [
     {
       "label": "FOUGHT_IN",
       "source": {

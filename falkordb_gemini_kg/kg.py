@@ -5,8 +5,12 @@ from falkordb_gemini_kg.classes.source import AbstractSource
 from falkordb_gemini_kg.classes.model_config import KnowledgeGraphModelConfig
 from falkordb_gemini_kg.steps.extract_data_step import ExtractDataStep
 from falkordb_gemini_kg.steps.graph_query_step import GraphQueryGenerationStep
+from falkordb_gemini_kg.fixtures.prompts import GRAPH_QA_SYSTEM, CYPHER_GEN_SYSTEM
 from falkordb_gemini_kg.steps.qa_step import QAStep
 from falkordb_gemini_kg.classes.ChatSession import ChatSession
+from falkordb_gemini_kg.helpers import map_dict_to_cypher_properties
+from falkordb_gemini_kg.classes.attribute import AttributeType, Attribute
+from falkordb_gemini_kg.models import GenerativeModelChatSession
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -81,7 +85,9 @@ class KnowledgeGraph:
 
         return [s.source for s in self.sources]
 
-    def process_sources(self, sources: list[AbstractSource]) -> None:
+    def process_sources(
+        self, sources: list[AbstractSource], instructions: str = None
+    ) -> None:
         """
         Add entities and relations found in sources into the knowledge-graph
 
@@ -93,52 +99,73 @@ class KnowledgeGraph:
             raise Exception("Ontology is not defined")
 
         # Create graph with sources
-        self._create_graph_with_sources(sources)
+        self._create_graph_with_sources(sources, instructions)
 
         # Add processed sources
         for src in sources:
             self.sources.add(src)
 
-    def _create_graph_with_sources(self, sources: list[AbstractSource] | None = None):
+    def _create_graph_with_sources(
+        self, sources: list[AbstractSource] | None = None, instructions: str = None
+    ):
 
         step = ExtractDataStep(
             sources=list(sources),
             ontology=self.ontology,
-            model_config=self._model_config.extract_data,
+            model=self._model_config.extract_data,
             graph=self.graph,
         )
 
-        step.run()
+        step.run(instructions)
 
-    def ask(self, question: str) -> str:
+    def ask(
+        self, question: str, qa_chat_session: GenerativeModelChatSession | None = None
+    ) -> tuple[str, GenerativeModelChatSession]:
         """
-        Query the knowledge graph using natural language
-        if the query is asked as part of a longer conversation make sure to
-        include past history.
+        Query the knowledge graph using natural language.
+        Optionally, you can provide a qa_chat_session to use for the query.
+
+        Parameters:
+            question (str): question to ask the knowledge graph
+            qa_chat_session (GenerativeModelChatSession|None): qa_chat_session to use for the query
 
         Returns:
-            str: answer
+            tuple[str, GenerativeModelChatSession]: answer, qa_chat_session
 
          Example:
-            >>> ans = kg.ask("Which actor has the most oscars")
-            >>> ans = kg.ask("List a few movies in which that actored played in", history)
+            >>> (ans, qa_chat_session) = kg.ask("List a few movies in which that actor played in")
+            >>> print(ans)
         """
 
+        cypher_chat_session = (
+            self._model_config.cypher_generation.with_system_instruction(
+                CYPHER_GEN_SYSTEM.replace("#ONTOLOGY", str(self.ontology.to_json())),
+            ).start_chat()
+        )
         cypher_step = GraphQueryGenerationStep(
             ontology=self.ontology,
-            model_config=self._model_config.cypher_generation,
+            chat_session=cypher_chat_session,
             graph=self.graph,
         )
 
         (context, cypher) = cypher_step.run(question)
 
+        if not cypher or len(cypher) == 0:
+            return "I am sorry, I could not find the answer to your question"
+
+        qa_chat_session = (
+            qa_chat_session
+            or self._model_config.qa.with_system_instruction(
+                GRAPH_QA_SYSTEM
+            ).start_chat()
+        )
         qa_step = QAStep(
-            model_config=self._model_config.qa,
+            chat_session=qa_chat_session,
         )
 
         answer = qa_step.run(question, cypher, context)
 
-        return answer
+        return (answer, qa_chat_session)
 
     def delete(self) -> None:
         """
@@ -158,3 +185,112 @@ class KnowledgeGraph:
 
     def chat_session(self) -> ChatSession:
         return ChatSession(self._model_config, self.ontology, self.graph)
+
+    def add_node(self, entity: str, attributes: dict):
+        """
+        Add a node to the knowledge graph, checking if it matches the ontology
+
+        Parameters:
+            label (str): label of the node
+            attributes (dict): node attributes
+        """
+
+        self._validate_entity(entity, attributes)
+
+        # Add node to graph
+        self.graph.query(
+            f"MERGE (n:{entity} {map_dict_to_cypher_properties(attributes)})"
+        )
+
+    def add_edge(
+        self,
+        relation: str,
+        source: str,
+        target: str,
+        source_attr: dict = None,
+        target_attr: dict = None,
+        attributes: dict = None,
+    ):
+        """
+        Add an edge to the knowledge graph, checking if it matches the ontology
+
+        Parameters:
+            relation (str): relation label
+            source (str): source entity label
+            target (str): target entity label
+            source_attr (dict): source entity attributes
+            target_attr (dict): target entity attributes
+            attributes (dict): relation attributes
+        """
+
+        source_attr = source_attr or {}
+        target_attr = target_attr or {}
+        attributes = attributes or {}
+
+        self._validate_relation(
+            relation, source, target, source_attr, target_attr, attributes
+        )
+
+        # Add relation to graph
+        self.graph.query(
+            f"MATCH (s:{source} {map_dict_to_cypher_properties(source_attr)}) MATCH (t:{target} {map_dict_to_cypher_properties(target_attr)}) MERGE (s)-[r:{relation} {map_dict_to_cypher_properties(attributes)}]->(t)"
+        )
+
+    def _validate_entity(self, entity: str, attributes: str):
+        ontology_entity = self.ontology.get_entity_with_label(entity)
+
+        if ontology_entity is None:
+            raise Exception(f"Entity {entity} not found in ontology")
+
+        self._validate_attributes_dict(attributes, ontology_entity.attributes)
+
+    def _validate_relation(
+        self,
+        relation: str,
+        source: str,
+        target: str,
+        source_attr: dict,
+        target_attr: dict,
+        attributes: dict,
+    ):
+        ontology_relations = self.ontology.get_relations_with_label(relation)
+
+        found_relation = [
+            relation
+            for relation in ontology_relations
+            if relation.source.label == source and relation.target.label == target
+        ]
+        if len(ontology_relations) == 0 or len(found_relation) == 0:
+            raise Exception(f"Relation {relation} not found in ontology")
+
+        self._validate_attributes_dict(attributes, found_relation[0].attributes)
+
+        self._validate_entity(source, source_attr)
+        self._validate_entity(target, target_attr)
+
+    def _validate_attributes_dict(
+        self, attr_dict: dict, attributes_list: list[Attribute]
+    ):
+        # validate attributes
+        for attr in attributes_list:
+            if attr.name not in attr_dict:
+                if attr.required or attr.unique:
+                    raise Exception(f"Attribute {attr.name} is required")
+
+        for attr in attr_dict.keys():
+            valid_attr = [a for a in attributes_list if a.name == attr]
+            if len(valid_attr) == 0:
+                raise Exception(f"Invalid attribute {attr}")
+            valid_attr = valid_attr[0]
+
+            if valid_attr.type == AttributeType.STRING:
+                if not isinstance(attr_dict[attr], str):
+                    raise Exception(f"Attribute {attr} should be a string")
+            elif valid_attr.type == AttributeType.NUMBER:
+                if not isinstance(attr_dict[attr], int) and not isinstance(
+                    attr_dict[attr], float
+                ):
+                    raise Exception(f"Attribute {attr} should be an number")
+            elif valid_attr.type == AttributeType.BOOLEAN:
+                if not isinstance(attr_dict[attr], bool):
+                    raise Exception(f"Attribute {attr} should be a boolean")

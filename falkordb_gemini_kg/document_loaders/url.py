@@ -21,7 +21,7 @@ class URLLoader():
 
     def _download(self) -> str:
         try:
-            response = requests.get(self.url)
+            response = requests.get(self.url, headers={'User-Agent': 'Mozilla/5.0'})
             response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
             return response.text
         except requests.exceptions.RequestException as e:

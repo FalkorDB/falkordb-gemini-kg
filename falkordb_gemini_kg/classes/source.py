@@ -1,7 +1,14 @@
 from typing import Iterator
 from abc import ABC, abstractmethod
 from falkordb_gemini_kg.classes.Document import Document
-from falkordb_gemini_kg.document_loaders import *
+from falkordb_gemini_kg.document_loaders import (
+    PDFLoader,
+    TextLoader,
+    URLLoader,
+    HTMLLoader,
+    CSVLoader,
+    JSONLLoader,
+)
 
 
 def Source(path: str, instruction: str | None = None) -> "AbstractSource":
@@ -29,6 +36,8 @@ def Source(path: str, instruction: str | None = None) -> "AbstractSource":
         s = URL(path)
     elif ".csv" in path.lower():
         s = CSV(path)
+    elif ".jsonl" in path.lower():
+        s = JSONL(path)
     else:
         s = TEXT(path)
 
@@ -46,6 +55,7 @@ class AbstractSource(ABC):
     def __init__(self, path: str):
         self.path = path
         self.loader = None
+        self.instruction = ""
 
     def load(self) -> Iterator[Document]:
         return self.loader.load()
@@ -90,7 +100,6 @@ class URL(AbstractSource):
         self.loader = URLLoader(self.path)
 
 
-
 class HTML(AbstractSource):
     """
     HTML resource
@@ -109,3 +118,13 @@ class CSV(AbstractSource):
     def __init__(self, path, rows_per_document: int = 50):
         super().__init__(path)
         self.loader = CSVLoader(self.path, rows_per_document)
+
+
+class JSONL(AbstractSource):
+    """
+    JSONL resource
+    """
+
+    def __init__(self, path, rows_per_document: int = 50):
+        super().__init__(path)
+        self.loader = JSONLLoader(self.path, rows_per_document)

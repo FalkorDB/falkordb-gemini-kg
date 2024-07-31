@@ -18,6 +18,11 @@ sqlalchemy = "^2.0.30"
 pypdf = "^4.2.0"
 vertexai = "^1.49.0"
 backoff = "^2.2.1"
+python-abc = "^0.2.0"
+ratelimit = "^2.2.1"
+python-dotenv = "^1.0.1"
+openai = "^1.35.9"
+fix-busted-json = "^0.0.18"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.2.1"
@@ -33,6 +38,6 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 log_cli = true
-log_cli_level = "DEBUG"
+log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"

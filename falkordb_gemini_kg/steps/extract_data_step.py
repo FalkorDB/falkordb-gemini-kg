@@ -2,14 +2,13 @@ from falkordb_gemini_kg.steps.Step import Step
 from falkordb_gemini_kg.classes.source import AbstractSource
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from falkordb_gemini_kg.classes.ontology import Ontology
-from falkordb_gemini_kg.classes.model_config import StepModelConfig
-from vertexai.generative_models import (
+from falkordb_gemini_kg.models import (
     GenerativeModel,
-    ChatSession,
-    ResponseValidationError,
+    GenerativeModelChatSession,
     GenerationResponse,
     FinishReason,
 )
+
 from falkordb_gemini_kg.fixtures.prompts import (
     EXTRACT_DATA_SYSTEM,
     EXTRACT_DATA_PROMPT,
@@ -38,7 +37,7 @@ class ExtractDataStep(Step):
         self,
         sources: list[AbstractSource],
         ontology: Ontology,
-        model_config: StepModelConfig,
+        model: GenerativeModel,
         graph: Graph,
         config: dict = {
             "max_workers": 16,
@@ -49,32 +48,24 @@ class ExtractDataStep(Step):
         self.sources = sources
         self.ontology = ontology
         self.config = config
-        self.model_config = model_config
+        self.model = model.with_system_instruction(
+            EXTRACT_DATA_SYSTEM.replace("#ONTOLOGY", str(self.ontology.to_json()))
+        )
         self.graph = graph
 
         if not os.path.exists("logs"):
             os.makedirs("logs")
 
     def _create_chat(self):
-        return GenerativeModel(
-            self.model_config.model,
-            generation_config=(
-                self.model_config.generation_config.to_generation_config()
-                if self.model_config.generation_config is not None
-                else None
-            ),
-            system_instruction=EXTRACT_DATA_SYSTEM.replace(
-                "#ONTOLOGY", str(self.ontology.to_json())
-            ),
-        ).start_chat(response_validation=False)
+        return self.model.start_chat({"response_validation": False})
 
-    def run(self):
+    def run(self, instructions: str = None):
 
         tasks: list[Future[Ontology]] = []
         with ThreadPoolExecutor(max_workers=self.config["max_workers"]) as executor:
             # extract entities and relationships from each page
             documents = [
-                document
+                (document, source.instruction)
                 for source in self.sources
                 for document in source.load()
                 if document is not None
@@ -82,7 +73,7 @@ class ExtractDataStep(Step):
                 and len(document.content) > 0
             ]
             logger.debug(f"Processing {len(documents)} documents")
-            for document in documents:
+            for document, source_instructions in documents:
                 task_id = "extract_data_step_" + str(uuid4())
                 task = executor.submit(
                     self._process_source,
@@ -91,6 +82,8 @@ class ExtractDataStep(Step):
                     document,
                     self.ontology,
                     self.graph,
+                    source_instructions,
+                    instructions,
                 )
                 tasks.append(task)
 
@@ -100,10 +93,12 @@ class ExtractDataStep(Step):
     def _process_source(
         self,
         task_id: str,
-        chat_session: ChatSession,
+        chat_session: GenerativeModelChatSession,
         document: Document,
         ontology: Ontology,
         graph: Graph,
+        source_instructions: str = "",
+        instructions: str = "",
     ):
         try:
             _task_logger = logging.getLogger(task_id)
@@ -122,7 +117,15 @@ class ExtractDataStep(Step):
             logger.debug(f"Processing task: {task_id}")
             _task_logger.debug(f"Processing task: {task_id}")
             text = document.content[: self.config["max_input_tokens"]]
-            user_message = EXTRACT_DATA_PROMPT.format(text=text)
+            user_message = EXTRACT_DATA_PROMPT.format(
+                text=text,
+                instructions="\n".join(
+                    [
+                        source_instructions if source_instructions is not None else "",
+                        instructions if instructions is not None else "",
+                    ]
+                ),
+            )
 
             # logger.debug(f"User message: {user_message}")
             _task_logger.debug("User message: " + user_message.replace("\n", " "))
@@ -132,12 +135,9 @@ class ExtractDataStep(Step):
 
             responses.append(self._call_model(chat_session, user_message))
 
-            _task_logger.debug(f"Model response: {responses[response_idx]}")
+            _task_logger.debug(f"Model response: {responses[response_idx].text}")
 
-            while (
-                responses[response_idx].candidates[0].finish_reason
-                == FinishReason.MAX_TOKENS
-            ):
+            while responses[response_idx].finish_reason == FinishReason.MAX_TOKENS:
                 _task_logger.debug("Asking model to continue")
                 response_idx += 1
                 responses.append(self._call_model(chat_session, "continue"))
@@ -145,19 +145,19 @@ class ExtractDataStep(Step):
                     f"Model response after continue: {responses[response_idx].text}"
                 )
 
-            if responses[response_idx].candidates[0].finish_reason != FinishReason.STOP:
+            if responses[response_idx].finish_reason != FinishReason.STOP:
                 _task_logger.debug(
-                    f"Model stopped unexpectedly: {responses[response_idx].candidates[0].finish_reason}"
+                    f"Model stopped unexpectedly: {responses[response_idx].finish_reason}"
                 )
                 raise Exception(
-                    f"Model stopped unexpectedly: {responses[response_idx].candidates[0].finish_reason}"
+                    f"Model stopped unexpectedly: {responses[response_idx].finish_reason}"
                 )
 
             combined_text = " ".join([r.text for r in responses])
 
             try:
                 data = json.loads(extract_json(combined_text))
-            except json.decoder.JSONDecodeError as e:
+            except Exception as e:
                 _task_logger.debug(f"Error extracting JSON: {e}")
                 _task_logger.debug(f"Prompting model to fix JSON")
                 json_fix_response = self._call_model(
@@ -167,34 +167,38 @@ class ExtractDataStep(Step):
                 data = json.loads(extract_json(json_fix_response.text))
                 _task_logger.debug(f"Fixed JSON: {data}")
 
-            if not "nodes" in data or not "edges" in data:
-                _task_logger.debug(f"Invalid data format: {data}")
-                raise Exception(f"Invalid data format: {data}")
-
-            for node in data["nodes"]:
+            if "entities" not in data or "relations" not in data:
+                _task_logger.debug(
+                    f"Invalid data format. Missing entities or relations. {data}"
+                )
+                raise Exception(
+                    f"Invalid data format. Missing 'entities' or 'relations' in JSON."
+                )
+            for entity in data["entities"]:
                 try:
-                    self._create_node(graph, node, ontology)
+                    self._create_entity(graph, entity, ontology)
                 except Exception as e:
-                    logger.exception(e)
+                    _task_logger.error(f"Error creating entity: {e}")
                     continue
 
-            for edge in data["edges"]:
+            for relation in data["relations"]:
                 try:
-                    self._create_edge(graph, edge, ontology)
+                    self._create_relation(graph, relation, ontology)
                 except Exception as e:
-                    logger.exception(e)
+                    _task_logger.error(f"Error creating relation: {e}")
                     continue
+
         except Exception as e:
             logger.exception(e)
             raise e
 
-    def _create_node(self, graph: Graph, args: dict, ontology: Ontology):
-        # Get unique attributes from node
-        node = ontology.get_node_with_label(args["label"])
-        if node is None:
-            print(f"Node with label {args['label']} not found in ontology")
+    def _create_entity(self, graph: Graph, args: dict, ontology: Ontology):
+        # Get unique attributes from entity
+        entity = ontology.get_entity_with_label(args["label"])
+        if entity is None:
+            print(f"Entity with label {args['label']} not found in ontology")
             return None
-        unique_attributes_schema = [attr for attr in node.attributes if attr.unique]
+        unique_attributes_schema = [attr for attr in entity.attributes if attr.unique]
         unique_attributes = {
             attr.name: (
                 args["attributes"][attr.name] if attr.name in args["attributes"] else ""
@@ -204,7 +208,7 @@ class ExtractDataStep(Step):
         unique_attributes_text = map_dict_to_cypher_properties(unique_attributes)
         non_unique_attributes = {
             attr.name: args["attributes"][attr.name]
-            for attr in node.attributes
+            for attr in entity.attributes
             if not attr.unique and attr.name in args["attributes"]
         }
         non_unique_attributes_text = map_dict_to_cypher_properties(
@@ -220,10 +224,10 @@ class ExtractDataStep(Step):
         result = graph.query(query)
         return result
 
-    def _create_edge(self, graph: Graph, args: dict, ontology: Ontology):
-        edge = ontology.get_edge_with_label(args["label"])
-        if edge is None:
-            print(f"Edge with label {args['label']} not found in ontology")
+    def _create_relation(self, graph: Graph, args: dict, ontology: Ontology):
+        relations = ontology.get_relations_with_label(args["label"])
+        if len(relations) == 0:
+            print(f"Relations with label {args['label']} not found in ontology")
             return None
         source_unique_attributes = (
             args["source"]["attributes"]
@@ -243,13 +247,13 @@ class ExtractDataStep(Step):
             target_unique_attributes
         )
 
-        edge_attributes = (
+        relation_attributes = (
             map_dict_to_cypher_properties(args["attributes"])
             if "attributes" in args
             else {}
         )
         set_statement = (
-            f"SET r += {edge_attributes}"
+            f"SET r += {relation_attributes}"
             if "attributes" in args
             and len(
                 args["attributes"]
@@ -268,7 +272,7 @@ class ExtractDataStep(Step):
     @limits(calls=15, period=60)
     def _call_model(
         self,
-        chat_session: ChatSession,
+        chat_session: GenerativeModelChatSession,
         prompt: str,
         retry=6,
     ):

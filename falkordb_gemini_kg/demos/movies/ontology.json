@@ -1,5 +1,5 @@
 {
-  "nodes": [
+  "entities": [
     {
       "label": "Movie",
       "attributes": [
@@ -136,7 +136,7 @@
       ]
     }
   ],
-  "edges": [
+  "relations": [
     {
       "label": "DIRECTED",
       "source": {
