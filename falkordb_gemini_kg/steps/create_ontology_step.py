@@ -1,6 +1,6 @@
 from falkordb_gemini_kg.steps.Step import Step
 from falkordb_gemini_kg.classes.source import AbstractSource
-from falkordb_gemini_kg.classes.Document import Document
+from falkordb_gemini_kg.classes.document import Document
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from falkordb_gemini_kg.classes.ontology import Ontology
 from falkordb_gemini_kg.fixtures.prompts import (

@@ -1,6 +1,6 @@
 import csv
 from typing import Iterator
-from falkordb_gemini_kg.classes.Document import Document
+from falkordb_gemini_kg.classes.document import Document
 
 
 class CSVLoader:

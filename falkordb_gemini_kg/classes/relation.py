@@ -1,7 +1,7 @@
 import json
 import re
 import logging
-from .attribute import Attribute, AttributeType
+from .attribute import Attribute
 from falkordb import Node as GraphNode, Edge as GraphEdge
 from falkordb_gemini_kg.fixtures.regex import (
     EDGE_LABEL_REGEX,
@@ -14,22 +14,87 @@ logger = logging.getLogger(__name__)
 
 
 class _RelationEntity:
+    """
+    Represents a relation entity.
+
+    Attributes:
+        label (str): The label of the relation entity.
+    """
+
     def __init__(self, label: str):
+        """
+        Initializes a Relation object with the given label.
+
+        Args:
+            label (str): The label of the relation.
+
+        Returns:
+            None
+        """
         self.label = re.sub(r"([^a-zA-Z0-9_])", "", label)
 
     @staticmethod
     def from_json(txt: str):
+        """
+        Creates a _RelationEntity object from a JSON string.
+
+        Args:
+            txt (str): The JSON string representing the _RelationEntity object.
+
+        Returns:
+            _RelationEntity: The created _RelationEntity object.
+        """
         txt = txt if isinstance(txt, dict) else json.loads(txt)
         return _RelationEntity(txt.get("label", txt))
 
     def to_json(self):
+        """
+        Converts the _RelationEntity object to a JSON string.
+
+        Returns:
+            str: The JSON string representation of the _RelationEntity object.
+        """
         return {"label": self.label}
 
     def __str__(self) -> str:
+        """
+        Returns a string representation of the Relation object.
+        
+        The string representation includes the label of the Relation object.
+        
+        Returns:
+            str: The string representation of the Relation object.
+        """
         return f"(:{self.label})"
 
 
 class Relation:
+    """
+    Represents a relation between two entities in a graph.
+
+    Attributes:
+        label (str): The label of the relation.
+        source (_RelationEntity | str): The source entity of the relation.
+        target (_RelationEntity | str): The target entity of the relation.
+        attributes (list[Attribute]): The attributes associated with the relation.
+
+    Methods:
+        from_graph(relation: GraphEdge, entities: list[GraphNode]) -> Relation:
+            Creates a Relation object from a graph edge and a list of graph nodes.
+        from_json(txt: dict | str) -> Relation:
+            Creates a Relation object from a JSON string or dictionary.
+        from_string(txt: str) -> Relation:
+            Creates a Relation object from a string representation.
+        to_json() -> dict:
+            Converts the Relation object to a JSON dictionary.
+        combine(relation2: "Relation") -> Relation:
+            Combines the attributes of another Relation object with this Relation object.
+        to_graph_query() -> str:
+            Generates a Cypher query string for creating the relation in a graph database.
+        __str__() -> str:
+            Returns a string representation of the Relation object.
+    """
+
     def __init__(
         self,
         label: str,
@@ -37,6 +102,15 @@ class Relation:
         target: _RelationEntity | str,
         attributes: list[Attribute] = None,
     ):
+        """
+        Initializes a Relation object.
+
+        Args:
+            label (str): The label of the relation.
+            source (_RelationEntity | str): The source entity of the relation.
+            target (_RelationEntity | str): The target entity of the relation.
+            attributes (list[Attribute], optional): The attributes associated with the relation. Defaults to None.
+        """
         attributes = attributes or []
         if isinstance(source, str):
             source = _RelationEntity(source)
@@ -55,6 +129,16 @@ class Relation:
 
     @staticmethod
     def from_graph(relation: GraphEdge, entities: list[GraphNode]):
+        """
+        Creates a Relation object from a graph edge and a list of graph nodes.
+
+        Args:
+            relation (GraphEdge): The graph edge representing the relation.
+            entities (list[GraphNode]): The list of graph nodes representing the entities.
+
+        Returns:
+            Relation: The created Relation object.
+        """
         logger.debug(f"Relation.from_graph: {relation}")
         return Relation(
             relation.relation,
@@ -72,6 +156,15 @@ class Relation:
 
     @staticmethod
     def from_json(txt: dict | str):
+        """
+        Creates a Relation object from a JSON string or dictionary.
+
+        Args:
+            txt (dict | str): The JSON string or dictionary representing the relation.
+
+        Returns:
+            Relation: The created Relation object.
+        """
         txt = txt if isinstance(txt, dict) else json.loads(txt)
         return Relation(
             txt["label"],
@@ -86,6 +179,15 @@ class Relation:
 
     @staticmethod
     def from_string(txt: str):
+        """
+        Creates a Relation object from a string representation.
+
+        Args:
+            txt (str): The string representation of the relation.
+
+        Returns:
+            Relation: The created Relation object.
+        """
         label = re.search(EDGE_LABEL_REGEX, txt).group(0).strip()
         source = re.search(NODE_LABEL_REGEX, txt).group(0).strip()
         target = re.search(NODE_LABEL_REGEX, txt).group(1).strip()
@@ -104,6 +206,12 @@ class Relation:
         )
 
     def to_json(self):
+        """
+        Converts the Relation object to a JSON dictionary.
+
+        Returns:
+            dict: The JSON dictionary representing the Relation object.
+        """
         return {
             "label": self.label,
             "source": self.source.to_json(),
@@ -112,7 +220,15 @@ class Relation:
         }
 
     def combine(self, relation2: "Relation"):
-        """Overwrite attributes of self with attributes of relation2."""
+        """
+        Overwrites attributes of self with attributes of relation2.
+
+        Args:
+            relation2 (Relation): The Relation object whose attributes will be combined.
+
+        Returns:
+            Relation: The combined Relation object.
+        """
         if self.label != relation2.label:
             raise Exception("Relations must have the same label to be combined")
 
@@ -124,7 +240,19 @@ class Relation:
         return self
 
     def to_graph_query(self):
+        """
+        Generates a Cypher query string for creating the relation in a graph database.
+
+        Returns:
+            str: The Cypher query string.
+        """
         return f"MATCH (s:{self.source.label}) MATCH (t:{self.target.label}) MERGE (s)-[r:{self.label} {{{', '.join([str(attr) for attr in self.attributes])}}}]->(t) RETURN r"
 
     def __str__(self) -> str:
+        """
+        Returns a string representation of the Relation object.
+
+        Returns:
+            str: The string representation of the Relation object.
+        """
         return f"{self.source}-[:{self.label} {{{', '.join([str(attr) for attr in self.attributes])}}}]->{self.target}"

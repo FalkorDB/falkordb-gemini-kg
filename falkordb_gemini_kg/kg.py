@@ -7,7 +7,7 @@ from falkordb_gemini_kg.steps.extract_data_step import ExtractDataStep
 from falkordb_gemini_kg.steps.graph_query_step import GraphQueryGenerationStep
 from falkordb_gemini_kg.fixtures.prompts import GRAPH_QA_SYSTEM, CYPHER_GEN_SYSTEM
 from falkordb_gemini_kg.steps.qa_step import QAStep
-from falkordb_gemini_kg.classes.ChatSession import ChatSession
+from falkordb_gemini_kg.classes.chat_session import ChatSession
 from falkordb_gemini_kg.helpers import map_dict_to_cypher_properties
 from falkordb_gemini_kg.classes.attribute import AttributeType, Attribute
 from falkordb_gemini_kg.models import GenerativeModelChatSession

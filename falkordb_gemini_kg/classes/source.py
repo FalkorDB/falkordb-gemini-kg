@@ -1,6 +1,6 @@
 from typing import Iterator
 from abc import ABC, abstractmethod
-from falkordb_gemini_kg.classes.Document import Document
+from falkordb_gemini_kg.classes.document import Document
 from falkordb_gemini_kg.document_loaders import (
     PDFLoader,
     TextLoader,

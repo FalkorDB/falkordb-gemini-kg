@@ -18,7 +18,7 @@ import logging
 from falkordb_gemini_kg.helpers import extract_json, map_dict_to_cypher_properties
 import json
 from falkordb import Graph
-from falkordb_gemini_kg.classes.Document import Document
+from falkordb_gemini_kg.classes.document import Document
 from uuid import uuid4
 import os
 import time

@@ -128,5 +128,5 @@ class OpenAiChatSession(GenerativeModelChatSession):
         )
         content = self._model.parse_generate_content_response(response)
         self._history.append({"role": "user", "content": message})
-        self._history.append({"role": "system", "content": content.text})
+        self._history.append({"role": "assistant", "content": content.text})
         return content

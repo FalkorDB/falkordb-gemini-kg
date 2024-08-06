@@ -2,7 +2,7 @@ import re
 import requests
 from typing import Iterator
 from bs4 import BeautifulSoup
-from falkordb_gemini_kg.classes.Document import Document
+from falkordb_gemini_kg.classes.document import Document
 
 
 class HTMLLoader:
